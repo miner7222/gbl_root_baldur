@@ -22,6 +22,12 @@ clean: targets_clean clean_submodules
 
 target_generic_efi:
 	cd targets/generic_efi && make build
+target_generic_efi_prc:
+	cd targets/generic_efi && make build_prc
+target_generic_efi_row:
+	cd targets/generic_efi && make build_row
+target_generic_efi_all:
+	cd targets/generic_efi && make build_all
 target_toolkit_windows:
 	cd targets/toolkit_windows && make build 
 target_toolkit_linux:

@@ -186,6 +186,12 @@
     !if $(DISABLE_PRINT) == 1
       GCC:*_*_*_CC_FLAGS = -DDISABLE_PRINT
   !endif
+  !if $(FORCE_PCBAIDINFO_PRC) == 1
+      GCC:*_*_*_CC_FLAGS = -DFORCE_PCBAIDINFO_PRC
+  !endif
+  !if $(FORCE_PCBAIDINFO_ROW) == 1
+      GCC:*_*_*_CC_FLAGS = -DFORCE_PCBAIDINFO_ROW
+  !endif
   !if $(WEAR_OS)
       GCC:*_*_*_CC_FLAGS = -DWEAR_OS
   !endif

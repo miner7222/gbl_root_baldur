@@ -631,6 +631,512 @@ BOOLEAN patch_warning(CHAR8* buffer, INT32 size, INT32 global_var_offset) {
     return TRUE;
 }
 
+/* Region-bind compatibility bypass.
+ *
+ * Anchor: diagnostic string printed when image / device region tags
+ * mismatch (typo "is not invalid" intact in known vintages).
+ *
+ * Stage A: Rewrite the cbz Xt sitting one instruction before the
+ * adrp+add to that string into an unconditional B with the same
+ * compatible-path target. The primary mismatch branch can no longer
+ * fall into the shutdown sequence.
+ *
+ * Stage B: Two secondary shutdown branches (B.EQ and CBNZ Xt) in the
+ * same block remain reachable from alternative entries that bypass
+ * the cbz. They both target a single shutdown stub. Overwrite that
+ * stub's first instruction with an unconditional B to the same
+ * compatible-path target so every incoming branch becomes a no-op
+ * redirect.
+ *
+ * 8-byte runtime patch (4 + 4). Stage A alone is enough for the
+ * common direct-mismatch case; Stage B closes the rarer secondary
+ * paths. No-op on images without the anchor.
+ */
+INT32 patch_region_lockout_bypass(CHAR8* buffer, INT32 size) {
+    static const CHAR8 anchor[] = "region info is not invalid";
+    INT32 anchor_len = (INT32)(sizeof(anchor) - 1);
+
+    /* Locate the anchor string. */
+    INT32 str_off = -1;
+    for (INT32 i = 0; i + anchor_len < size; ++i) {
+        if (memcmp_patcher(buffer + i, anchor, anchor_len) == 0) {
+            str_off = i;
+            break;
+        }
+    }
+    if (str_off < 0) {
+        Print_patcher("region bypass: anchor not found, skipping\n");
+        return 0;
+    }
+    Print_patcher("region bypass: anchor @ 0x%X\n", str_off);
+
+    /* Locate the adrp+add pair that materialises the anchor address. */
+    INT32 adrl_off = -1;
+    for (INT32 i = 0; i + 8 <= size; i += 4) {
+        DecodedInst d0 = decode_at(buffer, i);
+        if (d0.type != INST_ADRP) continue;
+        DecodedInst d1 = decode_at(buffer, i + 4);
+        if (d1.type != INST_ADD_X_IMM) continue;
+        if (d1.rt != d0.rt || d1.rn != d0.rt) continue;
+        INT64 t = calc_adrl_file_offset(buffer, i, 0);
+        if (t == (INT64)str_off) {
+            adrl_off = i;
+            break;
+        }
+    }
+    if (adrl_off < 0) {
+        Print_patcher("region bypass: adrp+add ref not found, skipping\n");
+        return 0;
+    }
+    Print_patcher("region bypass: adrp+add ref @ 0x%X\n", adrl_off);
+
+    /* The gating branch sits exactly one instruction before the adrp. */
+    INT32 cbz_off = adrl_off - 4;
+    if (cbz_off < 0 || cbz_off + 4 > size) {
+        Print_patcher("region bypass: pre-anchor offset out of range\n");
+        return 0;
+    }
+    UINT32 v = *(UINT32*)(buffer + cbz_off);
+
+    /* Accept either CBZ Xt (0xb4) or CBZ Wt (0x34). */
+    UINT8 hi = (UINT8)((v >> 24) & 0xff);
+    if (hi != 0xb4 && hi != 0x34) {
+        Print_patcher("region bypass: pre-anchor instr is 0x%08X (hi=0x%02x),"
+                      " expected CBZ; skipping\n", v, hi);
+        return 0;
+    }
+
+    /* Decode CBZ target. imm19 is signed and scaled by 4. */
+    INT32 imm19 = (INT32)((v >> 5) & 0x7ffff);
+    if (imm19 & 0x40000) imm19 -= 0x80000;
+    INT32 target = cbz_off + imm19 * 4;
+
+    if (target < 0 || target >= size) {
+        Print_patcher("region bypass: cbz target 0x%X out of range\n", target);
+        return 0;
+    }
+    Print_patcher("region bypass: cbz @ 0x%X -> compatible target 0x%X\n",
+                  cbz_off, target);
+
+    /* Stage A: rewrite cbz as unconditional B to the compatible target.
+     * imm26 is signed, scaled by 4, range +/- 128 MB which always
+     * covers a same-function branch. */
+    INT32 imm26 = (target - cbz_off) >> 2;
+    UINT32 new_v = 0x14000000U | ((UINT32)imm26 & 0x3ffffffU);
+
+    Print_patcher("region bypass: patching 0x%08X -> 0x%08X\n", v, new_v);
+    *(UINT32*)(buffer + cbz_off) = new_v;
+
+    /* Stage B: find the secondary shutdown stub and redirect it to the
+     * compatible target. Scan a short window past the primary site for
+     * B.cond / CBZ Xt / CBNZ Xt / CBZ Wt / CBNZ Wt whose target differs
+     * from the compatible target -- those land on the shutdown stub. */
+    INT32 shutdown_tgt = -1;
+    for (INT32 i = cbz_off + 4; i + 4 <= size && i < cbz_off + 0x80; i += 4) {
+        UINT32 ins = read_instr(buffer, i);
+        INT32 t = -1;
+
+        /* B.cond: 0x54xxxxxC where C in [0,15] */
+        if ((ins & 0xFF000010) == 0x54000000) {
+            INT32 b_imm19 = (INT32)((ins >> 5) & 0x7ffff);
+            if (b_imm19 & 0x40000) b_imm19 -= 0x80000;
+            t = i + b_imm19 * 4;
+        } else {
+            UINT8 hi2 = (UINT8)((ins >> 24) & 0xff);
+            if (hi2 == 0x34 || hi2 == 0x35 || hi2 == 0xb4 || hi2 == 0xb5) {
+                INT32 c_imm19 = (INT32)((ins >> 5) & 0x7ffff);
+                if (c_imm19 & 0x40000) c_imm19 -= 0x80000;
+                t = i + c_imm19 * 4;
+            }
+        }
+        if (t < 0 || t >= size) continue;
+        if (t == target) continue; /* compatible-path branch, leave alone */
+
+        shutdown_tgt = t;
+        break;
+    }
+    if (shutdown_tgt < 0) {
+        Print_patcher("region bypass: secondary shutdown stub not seen,"
+                      " stage A only\n");
+        return 1;
+    }
+
+    /* Sanity: stub must be backward (earlier in the section) and within
+     * reach of an unconditional B from itself. */
+    INT32 redirect_imm26 = (target - shutdown_tgt) >> 2;
+    if (redirect_imm26 < -0x2000000 || redirect_imm26 >= 0x2000000) {
+        Print_patcher("region bypass: stub 0x%X out of B range to 0x%X\n",
+                      shutdown_tgt, target);
+        return 1;
+    }
+
+    UINT32 stub_new = 0x14000000U | ((UINT32)redirect_imm26 & 0x3ffffffU);
+    Print_patcher("region bypass: stub @ 0x%X 0x%08X -> 0x%08X (B 0x%X)\n",
+                  shutdown_tgt, read_instr(buffer, shutdown_tgt),
+                  stub_new, target);
+    write_instr(buffer, shutdown_tgt, stub_new);
+
+    return 2;
+}
+
+/* Stage C — message-page universal bypass.
+ *
+ * Newer vintages move the diagnostic strings into a structured message
+ * table indexed by record id. The cbz X0 anchor used by Stage A no
+ * longer has a direct adrp+add xref (string-payload lookup is
+ * indirected through the table), so Stage A/B silently no-op. The
+ * shutdown stub still exists and still ends with `BL <reset>; B
+ * <continue>` after one or more `BL <print>` calls preceded by
+ * adrp+add references to the message page.
+ *
+ * Anchor: ASCII substring "incompatible with hardware" anywhere in the
+ * binary. Compute its page; walk .text for the first adrp+add pair
+ * targeting that page, then scan forward up to 0x80 bytes for the
+ * trailing `BL X; B Y` pair with Y a forward branch. Overwrite the BL
+ * with NOP. Execution falls through to the unconditional B which
+ * continues boot instead of calling ResetSystem.
+ *
+ * Selectivity: requires the candidate window to contain >= 2 adrp
+ * pairs aimed at the same page and >= 3 BL instructions before the
+ * trailing BL+B (printf cascade plus reset). These constraints uniquely
+ * identify the region-mismatch shutdown stub across known vintages and
+ * keep unrelated `BL; B` sequences from being touched.
+ *
+ * 4-byte runtime patch (single NOP). No-op on images without the
+ * message text.
+ */
+INT32 patch_region_bypass_stage_c(CHAR8* buffer, INT32 size) {
+    static const CHAR8 needle[] = "incompatible with hardware";
+    INT32 needle_len = (INT32)(sizeof(needle) - 1);
+
+    INT32 msg_off = -1;
+    for (INT32 i = 0; i + needle_len < size; ++i) {
+        if (memcmp_patcher(buffer + i, needle, needle_len) == 0) {
+            msg_off = i;
+            break;
+        }
+    }
+    if (msg_off < 0) {
+        Print_patcher("region bypass C: message text not present, skipping\n");
+        return 0;
+    }
+    INT32 msg_page = msg_off & ~0xfff;
+    Print_patcher("region bypass C: msg @ 0x%X (page 0x%X)\n", msg_off, msg_page);
+
+    for (INT32 i = 0x1000; i + 4 <= size; i += 4) {
+        UINT32 inst = read_instr(buffer, i);
+        if ((inst & 0x9F000000u) != 0x90000000u) continue;
+        /* decode adrp imm21 -> page target */
+        INT32 immlo = (INT32)((inst >> 29) & 3);
+        INT32 immhi = (INT32)((inst >> 5) & 0x7ffff);
+        INT32 imm21 = (immhi << 2) | immlo;
+        if (imm21 & 0x100000) imm21 -= 0x200000;
+        INT32 page = (i & ~0xfff) + (imm21 << 12);
+        if (page != msg_page) continue;
+
+        /* Scan a short forward window for BL+B trail plus selectivity
+         * counters. Counters seed with this adrp (1 adrp, 0 BL). */
+        INT32 limit = i + 0x80;
+        if (limit > size - 8) limit = size - 8;
+
+        INT32 adrp_to_page = 1;
+        INT32 bl_count = 0;
+
+        for (INT32 nx = i + 4; nx + 8 <= limit; nx += 4) {
+            UINT32 ins = read_instr(buffer, nx);
+
+            if ((ins & 0x9F000000u) == 0x90000000u) {
+                INT32 lo = (INT32)((ins >> 29) & 3);
+                INT32 hi = (INT32)((ins >> 5) & 0x7ffff);
+                INT32 im = (hi << 2) | lo;
+                if (im & 0x100000) im -= 0x200000;
+                INT32 pg = (nx & ~0xfff) + (im << 12);
+                if (pg == msg_page) adrp_to_page++;
+                continue;
+            }
+
+            if ((ins & 0xFC000000u) != 0x94000000u) continue;
+            bl_count++;
+
+            UINT32 br = read_instr(buffer, nx + 4);
+            if ((br & 0xFC000000u) != 0x14000000u) continue;
+
+            INT32 b_imm26 = (INT32)(br & 0x3ffffffu);
+            if (b_imm26 & 0x2000000) b_imm26 -= 0x4000000;
+            if (b_imm26 <= 0) continue;
+            INT32 b_target = (nx + 4) + b_imm26 * 4;
+            if (b_target < 0 || b_target >= size) continue;
+
+            /* Selectivity: shutdown stub has multiple adrp refs and a
+             * print cascade before the reset call. */
+            if (adrp_to_page < 2 || bl_count < 3) continue;
+
+            Print_patcher("region bypass C: NOP BL @ 0x%X (was 0x%08X), "
+                          "post-BL B -> 0x%X\n",
+                          nx, read_instr(buffer, nx), b_target);
+            write_instr(buffer, nx, NOP);
+            return 1;
+        }
+    }
+
+    Print_patcher("region bypass C: shutdown BL+B pattern not located\n");
+    return 0;
+}
+
+/* Stage D — kernel cmdline `androidboot.pcbaidinfo=` value override.
+ *
+ * ABL builds the kernel cmdline by appending `androidboot.pcbaidinfo=<value>`
+ * where the value is sourced at runtime (TZ region tag or device buffer).
+ * To force a fixed value, redirect the value-buffer pointer at the
+ * emission call site so the formatter reads from a known rodata literal
+ * ("PRC" or "ROW") instead of the runtime buffer.
+ *
+ * Pattern (OLD PRC / ROW vintages):
+ *   ADRP Xa, <page-of-pcbaidinfo>
+ *   ADD  Xa, Xa, #<imm12-of-pcbaidinfo>      ; key string
+ *   ADD  X2, SP, #imm                        ; value buffer ptr   <-- target
+ *   ...
+ *   BL   <formatter>                          ; emits "key=value"
+ *
+ * Rewrite the `ADD X2, SP, #imm` (or `ADD X2, X_any, #imm`) into
+ * `ADR X2, <region_literal>`. The literal is a 3-char NUL-terminated
+ * string already present in rodata. ADR has +/- 1MB range which is
+ * sufficient within a single ABL image.
+ *
+ * region must be 3 chars ("PRC" or "ROW"). Locator skips if the
+ * direct adrp+add key xref is absent (e.g., newer record-table style —
+ * needs separate handling).
+ */
+INT32 patch_pcbaidinfo_override(CHAR8* buffer, INT32 size,
+                                const CHAR8* region) {
+    static const CHAR8 key[] = " androidboot.pcbaidinfo=";
+    INT32 key_len = (INT32)(sizeof(key) - 1);
+
+    if (region == 0 || region[0] == 0 || region[1] == 0 || region[2] == 0) {
+        Print_patcher("pcbaidinfo: invalid region argument, skipping\n");
+        return 0;
+    }
+
+    /* Locate key string */
+    INT32 key_off = -1;
+    for (INT32 i = 0; i + key_len < size; ++i) {
+        if (memcmp_patcher(buffer + i, key, key_len) == 0) {
+            key_off = i; break;
+        }
+    }
+    if (key_off < 0) {
+        Print_patcher("pcbaidinfo: key string not present, skipping\n");
+        return 0;
+    }
+    Print_patcher("pcbaidinfo: key @ 0x%X (forcing %a)\n", key_off, region);
+
+    /* Locate region literal: \0<region>\0 */
+    INT32 lit_off = -1;
+    for (INT32 i = 0; i + 4 < size; ++i) {
+        if (buffer[i] == 0
+            && buffer[i+1] == region[0]
+            && buffer[i+2] == region[1]
+            && buffer[i+3] == region[2]
+            && buffer[i+4] == 0) {
+            lit_off = i + 1; break;
+        }
+    }
+    if (lit_off < 0) {
+        Print_patcher("pcbaidinfo: region literal not present, skipping\n");
+        return 0;
+    }
+    Print_patcher("pcbaidinfo: region literal @ 0x%X\n", lit_off);
+
+    /* Walk .text for ADRP+ADD pair targeting the key string. */
+    INT32 patched = 0;
+    for (INT32 i = 0x1000; i + 8 <= size; i += 4) {
+        DecodedInst d0 = decode_at(buffer, i);
+        if (d0.type != INST_ADRP) continue;
+        DecodedInst d1 = decode_at(buffer, i + 4);
+        if (d1.type != INST_ADD_X_IMM) continue;
+        if (d1.rt != d0.rt || d1.rn != d0.rt) continue;
+        INT64 t = calc_adrl_file_offset(buffer, i, 0);
+        if (t != (INT64)key_off) continue;
+
+        /* Scan next 0x20 bytes for ADD X2, X_any, #imm (sf=1, Rd=2). */
+        INT32 sink_off = -1;
+        for (INT32 j = i + 8; j + 4 <= size && j < i + 0x20; j += 4) {
+            UINT32 ins = read_instr(buffer, j);
+            if ((ins & 0xFF80001Fu) == 0x91000002u) {
+                sink_off = j; break;
+            }
+        }
+        if (sink_off < 0) continue;
+
+        /* Encode ADR X2, lit_off. ADR range is +/- 1MB. */
+        INT32 off = lit_off - sink_off;
+        if (off < -(1 << 20) || off >= (1 << 20)) {
+            Print_patcher("pcbaidinfo: ADR range exceeded, skipping site\n");
+            continue;
+        }
+        UINT32 imm21 = (UINT32)off & 0x1FFFFFu;
+        UINT32 immlo = imm21 & 3u;
+        UINT32 immhi = (imm21 >> 2) & 0x7FFFFu;
+        UINT32 adr = 0x10000000u
+                   | (immlo << 29)
+                   | (0x10u << 24)
+                   | (immhi << 5)
+                   | 2u;
+
+        Print_patcher("pcbaidinfo: ADR X2 @ 0x%X 0x%08X -> 0x%08X "
+                      "(literal 0x%X)\n",
+                      sink_off, read_instr(buffer, sink_off), adr, lit_off);
+        write_instr(buffer, sink_off, adr);
+        patched++;
+        break; /* Only patch the first emission site found */
+    }
+
+    if (patched == 0)
+        Print_patcher("pcbaidinfo: emission site not located (newer record-table style?)\n");
+    return patched;
+}
+
+/* Stage E — `hqsysfs.pcba_config=` kernel cmdline value override.
+ *
+ * The hqsysfs kernel module exposes /sys/module/hqsysfs/parameters/
+ * pcba_config which carries the region tag (PRC vs ROW) from the
+ * kernel cmdline argument `hqsysfs.pcba_config=PRC` emitted by ABL.
+ *
+ * Earlier revisions of this stage tried two approaches:
+ *  v1) Redirect the key-string adrp+add to an embedded override
+ *      " hqsysfs.pcba_config=ROW " in .data NUL padding. That flipped
+ *      /sys/module/hqsysfs/parameters/pcba_config to "ROW", but the
+ *      formatter still appended the runtime value behind our embed,
+ *      producing a stray "PRC" token after the space separator:
+ *          hqsysfs.pcba_config=ROW PRC
+ *      Userspace consumers searching /proc/cmdline for the substring
+ *      "PRC" still matched the stray, defeating the override.
+ *  v2) NOP only the first BL after the ADRL pair, hoping to suppress
+ *      the whole emission. That suppressed the key emission but not
+ *      the value emission (the formatter uses two BLs per cmdline
+ *      argument: first BL emits the key, second BL emits the value).
+ *      Result on /proc/cmdline:
+ *          hqsysfs.pcba_stage=MPPRC hqsysfs.pcba_hwid=...
+ *      The skipped key left "MP" (preceding emission's value) glued
+ *      directly to "PRC" (our emission's value) with no separator.
+ *
+ * v3 (current): keep both formatter calls, but redirect only the value
+ * pointer load to a fixed rodata literal. Pattern around ROW ABL:
+ *
+ *   ADRP X2, " hqsysfs.pcba_config="
+ *   ADD  X2, X2, #imm
+ *   BL   formatter                  ; emits key
+ *   LDR  X2, [SP, #imm]             ; runtime region ptr  <-- target
+ *   BL   formatter                  ; emits value
+ *
+ * Rewriting the LDR to `ADR X2, "ROW"` yields exactly
+ * `hqsysfs.pcba_config=ROW` with no trailing runtime PRC token.
+ *
+ * Builds without a direct adrp+add key xref (record-table vintages)
+ * silently no-op.
+ */
+INT32 patch_hqsysfs_pcba_config_override(CHAR8* buffer, INT32 size,
+                                          const CHAR8* region) {
+    static const CHAR8 key[] = " hqsysfs.pcba_config=";
+    INT32 key_len = (INT32)(sizeof(key) - 1);
+
+    if (region == 0 || region[0] == 0 || region[1] == 0 || region[2] == 0) {
+        Print_patcher("hqsysfs override: invalid region argument, skipping\n");
+        return 0;
+    }
+
+    /* Find key string in rodata */
+    INT32 key_off = -1;
+    for (INT32 i = 0; i + key_len < size; ++i) {
+        if (memcmp_patcher(buffer + i, key, key_len) == 0) {
+            key_off = i; break;
+        }
+    }
+    if (key_off < 0) {
+        Print_patcher("hqsysfs override: key string absent, skipping\n");
+        return 0;
+    }
+    Print_patcher("hqsysfs override: key @ 0x%X (forcing %a)\n", key_off, region);
+
+    INT32 lit_off = -1;
+    for (INT32 i = 0; i + 4 < size; ++i) {
+        if (buffer[i] == 0
+            && buffer[i+1] == region[0]
+            && buffer[i+2] == region[1]
+            && buffer[i+3] == region[2]
+            && buffer[i+4] == 0) {
+            lit_off = i + 1; break;
+        }
+    }
+    if (lit_off < 0) {
+        Print_patcher("hqsysfs override: region literal not present, skipping\n");
+        return 0;
+    }
+    Print_patcher("hqsysfs override: region literal @ 0x%X\n", lit_off);
+
+    /* Find the adrp+add pair targeting key_off, then locate the runtime
+     * value load between the key-emit BL and value-emit BL. */
+    INT32 patched = 0;
+    for (INT32 i = 0x1000; i + 8 <= size; i += 4) {
+        DecodedInst d0 = decode_at(buffer, i);
+        if (d0.type != INST_ADRP) continue;
+        DecodedInst d1 = decode_at(buffer, i + 4);
+        if (d1.type != INST_ADD_X_IMM) continue;
+        if (d1.rt != d0.rt || d1.rn != d0.rt) continue;
+        INT64 t = calc_adrl_file_offset(buffer, i, 0);
+        if (t != (INT64)key_off) continue;
+
+        INT32 bl1 = -1, bl2 = -1, value_load = -1;
+        for (INT32 j = i + 8; j + 4 <= size && j < i + 0x34; j += 4) {
+            UINT32 raw = read_instr(buffer, j);
+            /* arm64_inst_decoder has an INST_BL enum but no active BL decoder;
+             * match BL by raw opcode like the rest of this file. */
+            if ((raw & 0xFC000000u) == 0x94000000u) {
+                if (bl1 < 0) {
+                    bl1 = j;
+                } else {
+                    bl2 = j;
+                    break;
+                }
+                continue;
+            }
+
+            DecodedInst dj = decode_at(buffer, j);
+            if (bl1 >= 0 && dj.type == INST_LDR_X_IMM && dj.rt == 2) {
+                value_load = j;
+            }
+        }
+        if (bl1 < 0 || bl2 < 0 || value_load < 0 || value_load >= bl2) continue;
+
+        /* Encode ADR X2, lit_off. ADR range is +/- 1MB. */
+        INT32 off = lit_off - value_load;
+        if (off < -(1 << 20) || off >= (1 << 20)) {
+            Print_patcher("hqsysfs override: ADR range exceeded, skipping site\n");
+            continue;
+        }
+        UINT32 imm21 = (UINT32)off & 0x1FFFFFu;
+        UINT32 immlo = imm21 & 3u;
+        UINT32 immhi = (imm21 >> 2) & 0x7FFFFu;
+        UINT32 adr = 0x10000000u
+                   | (immlo << 29)
+                   | (0x10u << 24)
+                   | (immhi << 5)
+                   | 2u;
+
+        Print_patcher("hqsysfs override: ADR X2 @ 0x%X 0x%08X -> 0x%08X "
+                      "(literal 0x%X), key BL @ 0x%X, value BL @ 0x%X\n",
+                      value_load, read_instr(buffer, value_load), adr,
+                      lit_off, bl1, bl2);
+        write_instr(buffer, value_load, adr);
+        patched++;
+        break;
+    }
+
+    if (patched == 0)
+        Print_patcher("hqsysfs override: ADRL/value-load pair not found (newer record-table style?)\n");
+    return patched;
+}
+
 BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
     #ifndef DISABLE_PATCH_1
     if (patch_abl_gbl(data, size) != 0)
@@ -676,6 +1182,25 @@ BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
         Print_patcher("Warning: patch_warning failed\n");
     }
     // ==========================================================
+
+    #ifndef DISABLE_PATCH_REGION
+    if (patch_region_lockout_bypass(data, size) == 0)
+        Print_patcher("Info: region lockout bypass (A/B) not applied\n");
+    if (patch_region_bypass_stage_c(data, size) == 0)
+        Print_patcher("Info: region lockout bypass (C) not applied\n");
+    #endif
+
+    #if defined(FORCE_PCBAIDINFO_PRC)
+    if (patch_pcbaidinfo_override(data, size, "PRC") == 0)
+        Print_patcher("Info: pcbaidinfo override (PRC) not applied\n");
+    if (patch_hqsysfs_pcba_config_override(data, size, "PRC") == 0)
+        Print_patcher("Info: hqsysfs.pcba_config override (PRC) not applied\n");
+    #elif defined(FORCE_PCBAIDINFO_ROW)
+    if (patch_pcbaidinfo_override(data, size, "ROW") == 0)
+        Print_patcher("Info: pcbaidinfo override (ROW) not applied\n");
+    if (patch_hqsysfs_pcba_config_override(data, size, "ROW") == 0)
+        Print_patcher("Info: hqsysfs.pcba_config override (ROW) not applied\n");
+    #endif
 
     return 1;
 }
