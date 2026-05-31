@@ -192,6 +192,9 @@
   !if $(FORCE_PCBAIDINFO_ROW) == 1
       GCC:*_*_*_CC_FLAGS = -DFORCE_PCBAIDINFO_ROW
   !endif
+  !if $(FORCE_AVB_KEY_ARB) == 1
+      GCC:*_*_*_CC_FLAGS = -DFORCE_AVB_KEY_ARB
+  !endif
   !if $(WEAR_OS)
       GCC:*_*_*_CC_FLAGS = -DWEAR_OS
   !endif

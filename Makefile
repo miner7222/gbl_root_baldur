@@ -26,6 +26,10 @@ target_generic_efi_prc:
 	cd targets/generic_efi && make build_prc
 target_generic_efi_row:
 	cd targets/generic_efi && make build_row
+target_generic_efi_prc_arb:
+	cd targets/generic_efi && make build_prc_arb
+target_generic_efi_row_arb:
+	cd targets/generic_efi && make build_row_arb
 target_generic_efi_all:
 	cd targets/generic_efi && make build_all
 target_toolkit_windows:
