@@ -1592,6 +1592,181 @@ INT32 patch_unlock_region_token_bypass(CHAR8* buffer, INT32 size) {
     return patched;
 }
 
+/* Stage F - bypass AVB and TZ rollback protection.
+ *
+ * This stage covers three separate rollback channels:
+ *   1. force the AVB image-vs-stored rollback comparison to its accept path
+ *   2. replace WriteRollbackIndex with a success-return stub
+ *   3. suppress both TZ rollback-version update SIPs with fake success
+ *
+ * All four sites must be located before any instruction is changed.
+ */
+#define ROLLBACK_EXPECTED_PATCHES 4
+#define MOV_W0_WZR 0x2A1F03E0u
+#define RET_X30 0xD65F03C0u
+
+static BOOLEAN is_cmp_x_reg(UINT32 raw) {
+    return (raw & 0xFFE0FC1Fu) == 0xEB00001Fu;
+}
+
+static BOOLEAN is_b_cs(UINT32 raw) {
+    return (raw & 0xFF00001Fu) == 0x54000002u;
+}
+
+static UINT32 b_from_b_cond(UINT32 raw) {
+    INT32 imm19 = (INT32)((raw >> 5) & 0x7FFFFu);
+    if (imm19 & 0x40000)
+        imm19 |= ~0x7FFFF;
+    return 0x14000000u | ((UINT32)imm19 & 0x03FFFFFFu);
+}
+
+static BOOLEAN is_sub_sp_sp_imm(UINT32 raw) {
+    return (raw & 0xFFC003FFu) == 0xD10003FFu;
+}
+
+static BOOLEAN is_add_x_sp_imm(UINT32 raw, UINT8 rd) {
+    return (raw & 0xFFC003FFu) == (0x910003E0u | rd);
+}
+
+static INT32 find_string_offset(const CHAR8* buffer, INT32 size,
+                                const CHAR8* needle) {
+    INT32 len = strlen(needle);
+    if (len == 0 || size < len)
+        return -1;
+    for (INT32 off = 0; off <= size - len; ++off)
+        if (memcmp_patcher(buffer + off, needle, len) == 0)
+            return off;
+    return -1;
+}
+
+static INT32 find_rollback_compare_branch(const CHAR8* buffer, INT32 size) {
+    static const CHAR8 msg[] =
+        ": Image rollback index is less than the stored rollback index.";
+    INT32 msg_off = find_string_offset(buffer, size, msg);
+    INT32 found = -1;
+    INT32 count = 0;
+
+    if (msg_off < 0)
+        return -1;
+
+    for (INT32 xref = 0; xref <= size - 8; xref += 4) {
+        if (calc_adrl_file_offset(buffer, size, xref, 0) != msg_off)
+            continue;
+
+        INT32 start = xref - 0x60;
+        if (start < 4) start = 4;
+        for (INT32 br = xref - 4; br >= start; br -= 4) {
+            if (!is_b_cs(read_instr(buffer, br)))
+                continue;
+            if (!is_cmp_x_reg(read_instr(buffer, br - 4)))
+                continue;
+            found = br;
+            count++;
+            break;
+        }
+    }
+
+    return count == 1 ? found : -1;
+}
+
+static INT32 find_write_rollback_index_start(const CHAR8* buffer, INT32 size) {
+    static const CHAR8 msg[] =
+        "WriteRollbackIndex Location %d, RollbackIndex %d";
+    INT32 msg_off = find_string_offset(buffer, size, msg);
+    INT32 found = -1;
+    INT32 count = 0;
+
+    if (msg_off < 0)
+        return -1;
+
+    for (INT32 xref = 0; xref <= size - 8; xref += 4) {
+        if (calc_adrl_file_offset(buffer, size, xref, 0) != msg_off)
+            continue;
+
+        INT32 start = xref - 0x80;
+        if (start < 0) start = 0;
+        for (INT32 off = xref; off >= start; off -= 4) {
+            if (read_instr(buffer, off) != 0xD503233Fu)
+                continue;
+            if (!is_sub_sp_sp_imm(read_instr(buffer, off + 4)))
+                continue;
+            found = off;
+            count++;
+            break;
+        }
+    }
+
+    return count == 1 ? found : -1;
+}
+
+static INT32 find_tz_rollback_update_blr(const CHAR8* buffer, INT32 size,
+                                         UINT32 mov_id, UINT32 movk_id) {
+    INT32 found = -1;
+    INT32 count = 0;
+
+    for (INT32 off = 0; off <= size - 32; off += 4) {
+        if (read_instr(buffer, off) != mov_id)
+            continue;
+        if (!is_add_x_sp_imm(read_instr(buffer, off + 4), 3))
+            continue;
+        if (!is_add_x_sp_imm(read_instr(buffer, off + 8), 4))
+            continue;
+        if (read_instr(buffer, off + 12) != movk_id)
+            continue;
+        if (read_instr(buffer, off + 16) != 0x2A1F03E2u)
+            continue;
+        if (read_instr(buffer, off + 20) != 0xF9401C08u)
+            continue;
+        if (read_instr(buffer, off + 24) != 0xD63F0100u)
+            continue;
+        if (!is_cbz_x0(read_instr(buffer, off + 28)))
+            continue;
+
+        found = off + 24;
+        count++;
+    }
+
+    return count == 1 ? found : -1;
+}
+
+INT32 patch_rollback_protection_bypass(CHAR8* buffer, INT32 size) {
+    INT32 compare_br = find_rollback_compare_branch(buffer, size);
+    INT32 write_fn = find_write_rollback_index_start(buffer, size);
+    INT32 scm_ab_blr = find_tz_rollback_update_blr(
+        buffer, size, 0x52802201u, 0x72A64001u);
+    INT32 scm_legacy_blr = find_tz_rollback_update_blr(
+        buffer, size, 0x528023C1u, 0x72A04001u);
+
+    if (compare_br < 0 || write_fn < 0
+        || scm_ab_blr < 0 || scm_legacy_blr < 0) {
+        Print_patcher("rollback bypass: incomplete locator "
+                      "compare=0x%X write=0x%X scm_ab=0x%X scm_legacy=0x%X, "
+                      "skipping\n",
+                      compare_br, write_fn, scm_ab_blr, scm_legacy_blr);
+        return 0;
+    }
+
+    Print_patcher("rollback bypass: compare B.CS @ 0x%X 0x%08X -> B\n",
+                  compare_br, read_instr(buffer, compare_br));
+    write_instr(buffer, compare_br,
+                b_from_b_cond(read_instr(buffer, compare_br)));
+
+    Print_patcher("rollback bypass: WriteRollbackIndex @ 0x%X -> success\n",
+                  write_fn);
+    write_instr(buffer, write_fn, MOV_W0_WZR);
+    write_instr(buffer, write_fn + 4, RET_X30);
+
+    Print_patcher("rollback bypass: TZ AB update BLR @ 0x%X -> success\n",
+                  scm_ab_blr);
+    write_instr(buffer, scm_ab_blr, MOV_X0_XZR);
+
+    Print_patcher("rollback bypass: TZ legacy update BLR @ 0x%X -> success\n",
+                  scm_legacy_blr);
+    write_instr(buffer, scm_legacy_blr, MOV_X0_XZR);
+
+    return ROLLBACK_EXPECTED_PATCHES;
+}
+
 BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
     #ifndef DISABLE_PATCH_1
     if (patch_abl_gbl(data, size) != 0)
@@ -1681,6 +1856,12 @@ BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
     #ifndef DISABLE_PATCH_UNLOCK_REGION_TOKEN
     if (patch_unlock_region_token_bypass(data, size) == 0)
         Print_patcher("Info: unlock-region token bypass (E) not applied\n");
+    #endif
+
+    #ifndef DISABLE_PATCH_ROLLBACK_PROTECTION
+    if (patch_rollback_protection_bypass(data, size)
+        != ROLLBACK_EXPECTED_PATCHES)
+        Print_patcher("Info: rollback protection bypass (F) not applied\n");
     #endif
 
     return 1;
