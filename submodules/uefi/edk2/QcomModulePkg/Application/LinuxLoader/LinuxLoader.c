@@ -95,56 +95,6 @@ VOID BootIntoHibernationImage (BootInfo *Info,
 STATIC BOOLEAN BootIntoFastboot = FALSE;
 STATIC BOOLEAN BootIntoRecovery = FALSE;
 UINT64 FlashlessBootImageAddr = 0;
-STATIC DeviceInfo DevInfo;
-
-
-STATIC VOID
-SetDefaultAudioFw ()
-{
-  CHAR8 AudioFW[MAX_AUDIO_FW_LENGTH];
-  STATIC CHAR8* Src;
-  STATIC CHAR8* AUDIOFRAMEWORK;
-  STATIC UINT32 Length;
-  EFI_STATUS Status;
-
-  AUDIOFRAMEWORK = GetAudioFw ();
-  Status = ReadAudioFrameWork (&Src, &Length);
-  if ((AsciiStrCmp (Src, "audioreach") == 0) ||
-                              (AsciiStrCmp (Src, "elite") == 0) ||
-                              (AsciiStrCmp (Src, "awe") == 0)) {
-    if (Status == EFI_SUCCESS) {
-      if (AsciiStrLen (Src) == 0) {
-        if (AsciiStrLen (AUDIOFRAMEWORK) > 0) {
-          AsciiStrnCpyS (AudioFW, MAX_AUDIO_FW_LENGTH, AUDIOFRAMEWORK,
-          AsciiStrLen (AUDIOFRAMEWORK));
-          StoreAudioFrameWork (AudioFW, AsciiStrLen (AUDIOFRAMEWORK));
-        }
-      }
-    }
-    else {
-      DEBUG ((EFI_D_ERROR, "AUDIOFRAMEWORK is NOT updated length =%d, %a\n",
-      Length, AUDIOFRAMEWORK));
-    }
-  }
-  else {
-    if (Src != NULL) {
-      Status =
-      ReadWriteDeviceInfo (READ_CONFIG, (VOID *)&DevInfo, sizeof (DevInfo));
-      if (Status != EFI_SUCCESS) {
-        DEBUG ((EFI_D_ERROR, "Unable to Read Device Info: %r\n", Status));
-       }
-      gBS->SetMem (DevInfo.AudioFramework, sizeof (DevInfo.AudioFramework), 0);
-      gBS->CopyMem (DevInfo.AudioFramework, AUDIOFRAMEWORK,
-                                      AsciiStrLen (AUDIOFRAMEWORK));
-      Status =
-      ReadWriteDeviceInfo (WRITE_CONFIG, (VOID *)&DevInfo, sizeof (DevInfo));
-      if (Status != EFI_SUCCESS) {
-        DEBUG ((EFI_D_ERROR, "Unable to store audio framework: %r\n", Status));
-        return;
-      }
-    }
-  }
-}
 
 BOOLEAN IsABRetryCountUpdateRequired (VOID)
 {
@@ -176,96 +126,6 @@ BOOLEAN IsABRetryCountUpdateRequired (VOID)
   @retval other             Some error occurs when executing this entry point.
 
  **/
-/**
- * 等待指定时间内检测音量下键
- * 使用 WaitForEvent 避免轮询，更高效
- *
- * @param TimeoutMs超时时间（毫秒）
- * @return TRUE       检测到音量下键
- * @return FALSE      超时未检测到
- */
-STATIC UINT8
-WaitForVolumeDownKey (IN UINT32 TimeoutMs)
-{
-  EFI_STATUS    Status;
-  EFI_EVENT     TimerEvent;
-  EFI_EVENT     WaitList[2];
-  UINTN         EventIndex;
-  EFI_INPUT_KEY Key;
-  UINT8         KeyDetected = 0;
-
-  /* 先清空输入缓冲区 */
-  gST->ConIn->Reset (gST->ConIn, FALSE);
-
-  /* 创建定时器事件 */
-  Status = gBS->CreateEvent (
-                  EVT_TIMER,
-                  TPL_CALLBACK,
-                  NULL,
-                  NULL,
-                  &TimerEvent
-                  );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "CreateEvent Timer failed: %r\n", Status));
-    return FALSE;
-  }
-
-  /* 设置定时器：一次性触发，单位为100ns
-   * 5秒 = 5 * 1000 * 1000 * 10= 50,000,000 (100ns单位)
-   */
-  Status = gBS->SetTimer (
-                  TimerEvent,
-                  TimerRelative,
-                  (UINT64)TimeoutMs * 10000   /* ms ->100ns */
-                  );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "SetTimer failed: %r\n", Status));
-    gBS->CloseEvent (TimerEvent);
-    return FALSE;
-  }
-
-  /* 等待事件列表：按键事件 或 定时器超时 */
-  WaitList[0] = gST->ConIn->WaitForKey;
-  WaitList[1] = TimerEvent;
-
-  while (TRUE) {
-    Status = gBS->WaitForEvent (2, WaitList, &EventIndex);
-    if (EFI_ERROR (Status)) {
-      DEBUG ((EFI_D_ERROR, "WaitForEvent failed: %r\n", Status));
-      break;
-    }
-
-    if (EventIndex == 0) {
-      /* 按键事件触发 */
-      Status = gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
-      if (!EFI_ERROR (Status)) {
-        DEBUG ((EFI_D_INFO, "Key detected: ScanCode=0x%x, UnicodeChar=0x%x\n",Key.ScanCode, Key.UnicodeChar));
-
-        if (Key.ScanCode == SCAN_DOWN) {//fastboot key
-          /* 检测到音量下键 */
-          KeyDetected = 1;
-          break;
-        }
-        if (Key.ScanCode == SCAN_UP) { //recovery key
-          /* 检测到音量上键*/
-          KeyDetected = 2;
-          break;
-        }
-        /* 不是目标按键，继续等待 */
-        DEBUG ((EFI_D_INFO, "Not volume down key, continue waiting...\n"));
-      }
-    } else {
-      /* 定时器超时 */
-      DEBUG ((EFI_D_INFO, "Timeout: %d ms expired, no key pressed\n", TimeoutMs));
-      break;
-    }
-  }
-
-  /* 清理定时器事件 */
-  gBS->CloseEvent (TimerEvent);
-
-  return KeyDetected;
-}
 #ifndef TEST_ADAPTER
 STATIC EFI_STATUS
 BootEfiImage (VOID *Data, UINT32 Size)
@@ -945,35 +805,12 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     return EFI_SUCCESS;
   }
 
-  // 等待时间改为 3 秒，不按键时不显示白字
-  INT8 KeyStatus = WaitForVolumeDownKey (3000);
-  if(KeyStatus == 1) {
-    Print(L"Volume Down key detected, entering Fastboot mode...\n");
-  } else {
-    DEBUG ((EFI_D_INFO, "No key detected, proceeding with normal boot...\n"));
+  /* superfastboot entry disabled: official unlock + EDL write path covers
+   * recovery needs, and skipping the 3 s key wait shortens boot. */
 #ifndef TEST_ADAPTER
-    LoadIntegratedEfi();
+  LoadIntegratedEfi();
 #endif
-    return EFI_SUCCESS;
-   }
-  FindPtnActiveSlot ();
-  
-
-  BootIntoFastboot = TRUE;
-
-  SetDefaultAudioFw ();
-
-
-#ifdef AUTO_VIRT_ABL
-  DEBUG ((EFI_D_INFO, "Rebooting the device.\n"));
-  RebootDevice (NORMAL_MODE);
-#endif
-  DEBUG ((EFI_D_INFO, "Launching fastboot\n"));
-  Status = FastbootInitialize ();
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "Failed to Launch Fastboot App: %d\n", Status));
-    goto stack_guard_update_default;
-  }
+  return EFI_SUCCESS;
 
 stack_guard_update_default:
   /*Update stack check guard with defualt value then return*/
