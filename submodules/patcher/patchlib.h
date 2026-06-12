@@ -638,43 +638,83 @@ INT32 patch_adrl_unlocked_to_locked(CHAR8* buffer, INT32 size, UINT64 load_base)
     return patched;
 }
 
-CHAR8 keyword []="is not allowed in Lock State";
-BOOLEAN check_sub_string(CHAR8* str,CHAR8* keyword){
-    INT32 len = 0;
-    INT32 str_len = 0;
-    while(str[str_len]) str_len++;
-    while(keyword[len]) len++;
-    for (INT32 i = 0; i <= str_len - len; ++i) {
-        if (memcmp_patcher(str + i, keyword, len) == 0) {
-            return TRUE;
-        }
-    }
-    return FALSE;
-}
+/* Bypass the Snapshot Cancel locked-state gate.
+ *
+ * The denial block has a unique direct string reference preceded by:
+ *   ADRP X9, <protocol page>
+ *   LDR  X8, [SP, #imm]
+ *   BL   <state check>
+ *   B.NE <escape>
+ *   ADRP+ADD X0, "Snapshot Cancel is not allowed in Lock State"
+ *
+ * A single CBZ Wt in the preceding 0x300 bytes targets the start of that
+ * block. NOP the gate so execution stays on the allowed path.
+ */
+INT32 patch_snapshot_cancel_lock_bypass(CHAR8* buffer, INT32 size) {
+    static const CHAR8 message[] =
+        "Snapshot Cancel is not allowed in Lock State";
+    INT32 message_len = (INT32)(sizeof(message) - 1);
+    INT32 message_off = -1;
+    INT32 gate_off = -1;
+    INT32 found = 0;
 
-BOOLEAN patch_string_jump(CHAR8* buffer, INT32 size) {
-    BOOLEAN patched = FALSE;
-    for(int i = 0; i < size - 4; i += 4) {
-        DecodedInst d = decode_at(buffer, i);
-        INT64 jmp=0;
-        if(get_JUMP_target(&d,i,&jmp)){
-            if (jmp < 0 || jmp + 8 > size) continue;
-            DecodedInst a0 = decode_at(buffer, jmp);
-            DecodedInst a1 = decode_at(buffer, jmp + 4);
-            if (a0.type != INST_ADRP || a1.type != INST_ADD_X_IMM) continue;
-            if (a1.rt != a0.rt || a1.rn != a0.rt) continue;
-            INT64 off0 = calc_adrl_file_offset(buffer, size, jmp, 0);
-            if (off0 < 0 || off0 >= size) continue;
-            CHAR8* str = buffer + off0;
-            if(check_sub_string(str, keyword)){
-                Print_patcher("  String: %s\n", str);
-                //nop the jump instruction
-                write_instr(buffer, i, NOP); // NOP
-                patched = TRUE;
-            }
+    for (INT32 off = 0; off + message_len < size; ++off) {
+        if (memcmp_patcher(buffer + off, message, message_len) == 0) {
+            message_off = off;
+            break;
         }
     }
-    return patched;
+    if (message_off < 0)
+        return 0;
+
+    for (INT32 xref = 0; xref + 8 <= size; xref += 4) {
+        if (calc_adrl_file_offset(buffer, size, xref, 0) != message_off)
+            continue;
+        if (xref < 0x10)
+            continue;
+
+        INT32 error_block = xref - 0x10;
+        DecodedInst protocol_page = decode_at(buffer, error_block);
+        DecodedInst state_load = decode_at(buffer, error_block + 4);
+        UINT32 bl = read_instr(buffer, xref - 8);
+        UINT32 b_ne = read_instr(buffer, xref - 4);
+        if (protocol_page.type != INST_ADRP || protocol_page.rt != 9)
+            continue;
+        if (state_load.type != INST_LDR_X_IMM
+            || state_load.rt != 8 || state_load.rn != 31)
+            continue;
+        if ((bl & 0xFC000000u) != 0x94000000u)
+            continue;
+        if ((b_ne & 0xFF00001Fu) != 0x54000001u)
+            continue;
+
+        INT32 start = xref - 0x300;
+        if (start < 0) start = 0;
+        for (INT32 off = start; off < error_block; off += 4) {
+            UINT32 raw = read_instr(buffer, off);
+            if ((raw & 0x7F000000u) != 0x34000000u)
+                continue;
+
+            INT32 imm19 = (INT32)((raw >> 5) & 0x7FFFFu);
+            if (imm19 & 0x40000)
+                imm19 |= ~0x7FFFF;
+            if (off + (imm19 << 2) != error_block)
+                continue;
+
+            gate_off = off;
+            found++;
+        }
+    }
+
+    if (found != 1) {
+        Print_patcher("snapshot cancel lock bypass: locator count %d, "
+                      "skipping\n", found);
+        return 0;
+    }
+
+    Print_patcher("snapshot cancel lock bypass: NOP CBZ @ 0x%X\n", gate_off);
+    write_instr(buffer, gate_off, NOP);
+    return 1;
 }
 
 /* Stage A — region compatibility bypass.
@@ -1721,9 +1761,9 @@ BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
         return FALSE; //cr
     }
     #endif
-    #ifndef DISABLE_PATCH_6
-    if (!patch_string_jump(data, size))
-        Print_patcher("Warning: Failed to patch string jump\n");
+    #ifndef DISABLE_PATCH_SNAPSHOT_CANCEL_LOCK
+    if (patch_snapshot_cancel_lock_bypass(data, size) == 0)
+        Print_patcher("Info: snapshot cancel lock bypass not applied\n");
     #endif
     INT32 offset = -1;
     INT8 lock_register_num = -1;

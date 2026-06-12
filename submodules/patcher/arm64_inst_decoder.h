@@ -283,20 +283,6 @@ static BOOLEAN decode_inst_cbz_cbnz(UINT32 raw, DecodedInst* out) {
     return TRUE;
 }
 
-static BOOLEAN get_JUMP_target(DecodedInst* inst, INT64 instoff, INT64* target) {
-    switch (inst->type) {
-        case INST_B:
-        case INST_BL:
-        case INST_CBZ_W:
-        case INST_CBZ_X:
-        case INST_CBNZ_W:
-        case INST_CBNZ_X:
-            *target = instoff + inst->simm;
-            return TRUE;
-        default:
-            return FALSE;
-    }
-}
 /* 解码优先级表 —— 按照编码空间重叠度排序 */
 typedef BOOLEAN (*DecodeFunc)(UINT32, DecodedInst*);
 
