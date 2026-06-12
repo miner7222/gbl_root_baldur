@@ -297,9 +297,6 @@ static BOOLEAN get_JUMP_target(DecodedInst* inst, INT64 instoff, INT64* target) 
             return FALSE;
     }
 }
-static UINT32 change_rt(DecodedInst* inst, UINT8 new_rt) {
-    return (inst->raw & ~0x1Fu) | (new_rt & 0x1Fu);
-}
 /* 解码优先级表 —— 按照编码空间重叠度排序 */
 typedef BOOLEAN (*DecodeFunc)(UINT32, DecodedInst*);
 
