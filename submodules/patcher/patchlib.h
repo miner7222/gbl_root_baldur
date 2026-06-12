@@ -513,6 +513,13 @@ static UINT32 read_u32_unaligned(const CHAR8* buffer, INT32 off) {
          | ((UINT8)buffer[off+3] << 24);
 }
 
+static UINT64 read_u64_unaligned(const CHAR8* buffer, INT32 off) {
+    UINT64 v = 0;
+    for (INT32 i = 0; i < 8; ++i)
+        v |= ((UINT64)(UINT8)buffer[off + i]) << (i * 8);
+    return v;
+}
+
 static INT32 detect_pe_image_delta(const CHAR8* buffer, INT32 size) {
     static const CHAR8* cached_buffer = 0;
     static INT32 cached_size = 0;
@@ -1465,6 +1472,126 @@ INT32 patch_disable_lock_flash_cmd(CHAR8* buffer, INT32 size) {
     return patched;
 }
 
+/* Stage E - bypass `oem unlock-region` token verification.
+ *
+ * The command still requires a locked device and still accepts only the
+ * exact ROW / PRC region strings. Only the token challenge verification
+ * result is forced to success.
+ *
+ * Locator:
+ *   1. find standalone fastboot command string `oem unlock-region`
+ *   2. find command-table entry `{ cmd_string_va, callback_va }`
+ *   3. inside that callback, find the token gate:
+ *        BL <token-state>
+ *        TST W0,#0xff
+ *        B.EQ <no-token path>
+ *        BL <verify-token>
+ *        CBZ X0,<ok>
+ *   4. replace the verify-token BL with `MOV X0, XZR`
+ *
+ * Patching the BL to a zero return value is safer than NOP: the next
+ * instruction branches on X0 == 0.
+ */
+#define UNLOCK_REGION_TOKEN_BYPASS_MAX_BYTES 0x180
+#define MOV_X0_XZR 0xAA1F03E0u
+
+static BOOLEAN is_standalone_cstr(const CHAR8* buffer, INT32 size,
+                                  INT32 off, INT32 len) {
+    if (off < 0 || off + len >= size) return FALSE;
+    if (buffer[off + len] != 0) return FALSE;
+    if (off > 0 && buffer[off - 1] != 0) return FALSE;
+    return TRUE;
+}
+
+static BOOLEAN is_cbz_x0(UINT32 raw) {
+    return (raw & 0xFF00001Fu) == 0xB4000000u;
+}
+
+static INT32 patch_unlock_region_handler_token_bl(CHAR8* buffer, INT32 size,
+                                                  INT32 handler_off) {
+    if (handler_off < 0 || handler_off + 4 > size) return 0;
+    if (read_instr(buffer, handler_off) != 0xD503233Fu) return 0;
+
+    INT32 end = handler_off + UNLOCK_REGION_TOKEN_BYPASS_MAX_BYTES;
+    if (end > size - 8) end = size - 8;
+
+    for (INT32 off = handler_off + 4; off <= end; off += 4) {
+        UINT32 raw = read_instr(buffer, off);
+
+        if (off != handler_off && raw == 0xD503233Fu)
+            break;
+
+        if (raw != 0x72001C1Fu)
+            continue;
+
+        for (INT32 bl_off = off + 4; bl_off <= end; bl_off += 4) {
+            UINT32 bl = read_instr(buffer, bl_off);
+            if (bl == 0xD503233Fu)
+                break;
+            if ((bl & 0xFC000000u) != 0x94000000u)
+                continue;
+            if (!is_cbz_x0(read_instr(buffer, bl_off + 4)))
+                continue;
+
+            Print_patcher("unlock-region token bypass: handler 0x%X, "
+                          "verify BL @ 0x%X 0x%08X -> 0x%08X\n",
+                          handler_off, bl_off, bl, MOV_X0_XZR);
+            write_instr(buffer, bl_off, MOV_X0_XZR);
+            return 1;
+        }
+    }
+
+    Print_patcher("unlock-region token bypass: token BL not found in "
+                  "handler 0x%X\n", handler_off);
+    return 0;
+}
+
+INT32 patch_unlock_region_token_bypass(CHAR8* buffer, INT32 size) {
+    static const CHAR8 cmd[] = "oem unlock-region";
+    INT32 cmd_len = (INT32)(sizeof(cmd) - 1);
+    INT32 patched = 0;
+    INT32 delta = detect_pe_image_delta(buffer, size);
+
+    if (size < cmd_len + 16)
+        return 0;
+
+    for (INT32 cmd_off = 0; cmd_off + cmd_len < size; ++cmd_off) {
+        if (memcmp_patcher(buffer + cmd_off, cmd, cmd_len) != 0)
+            continue;
+        if (!is_standalone_cstr(buffer, size, cmd_off, cmd_len))
+            continue;
+
+        INT64 cmd_va = (INT64)cmd_off - delta;
+        if (cmd_va < 0)
+            continue;
+
+        for (INT32 ent = 0; ent + 16 <= size; ent += 8) {
+            if (read_u64_unaligned(buffer, ent) != (UINT64)cmd_va)
+                continue;
+
+            UINT64 handler_va = read_u64_unaligned(buffer, ent + 8);
+            if (handler_va > (UINT64)(size - delta - 4))
+                continue;
+
+            INT32 handler_off = (INT32)handler_va + delta;
+            INT32 n = patch_unlock_region_handler_token_bl(buffer, size,
+                                                           handler_off);
+            if (n == 0)
+                continue;
+            patched += n;
+            break;
+        }
+    }
+
+    if (patched == 0)
+        Print_patcher("unlock-region token bypass: command handler not "
+                      "located, skipping\n");
+    else if (patched > 1)
+        Print_patcher("unlock-region token bypass: warning, %d sites "
+                      "patched (expected 1)\n", patched);
+    return patched;
+}
+
 BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
     #ifndef DISABLE_PATCH_1
     if (patch_abl_gbl(data, size) != 0)
@@ -1549,6 +1676,11 @@ BOOLEAN PatchBuffer(CHAR8* data, INT32 size) {
     #ifndef DISABLE_PATCH_LOCK_FLASH_CMD
     if (patch_disable_lock_flash_cmd(data, size) == 0)
         Print_patcher("Info: disable lock-flash cmd (D) not applied\n");
+    #endif
+
+    #ifndef DISABLE_PATCH_UNLOCK_REGION_TOKEN
+    if (patch_unlock_region_token_bypass(data, size) == 0)
+        Print_patcher("Info: unlock-region token bypass (E) not applied\n");
     #endif
 
     return 1;
