@@ -1,93 +1,88 @@
-# GBL Root Canoe
+# GBL Root Baldur
 
-[中文版](README_zh.md)
+`gbl_root_baldur` is a focused fork of
+[`superturtlee/gbl_root_canoe`](https://github.com/superturtlee/gbl_root_canoe)
+for the `baldur` platform.
 
-`gbl_root_canoe` is an EDK2-based workspace for patching the EFI applications within Qualcomm ABL (Android Bootloader) images. It leverages a GBL (Generic Bootloader Loader) vulnerability to inject custom EFIs, primarily intended for achieving a **Fake Locked Bootloader** state on Snapdragon 8 Gen 5 / 8 Elite (Gen 5) devices to bypass bootloader unlock detection. The patched EFI is typically flashed into the `efisp` partition.
+For the baseline design, boot flow, and original fake-locked bootloader
+principles, read the upstream
+[`superturtlee/gbl_root_canoe`](https://github.com/superturtlee/gbl_root_canoe)
+repository first.
+
+This fork is not intended to target every Snapdragon 8 Gen 5 / 8 Elite Gen 5
+device. It keeps the upstream fake-locked boot flow as a base, then adds,
+retargets, or removes ABL patches according to what is needed for `baldur`.
+
+The generated EFI loads through the Qualcomm `efisp` UEFI path, reads the
+active-slot ABL image, applies the local patch set in memory, and chainloads the
+patched ABL.
 
 ---
 
 ## Builder Guide
 
-This section is for developers who want to compile the toolkits from source.
+Builds are expected to run on Linux or WSL with the project Docker image.
 
 ### Prerequisites
-You must be on a **Linux** host to build the project:
-- `gcc` / `clang`, `lld`, `make`, `zip`, `python3`
-- `liblzma-dev` (for compiling `extractfv`)
-- **Android NDK** (Required for `make build_module` to cross-compile tools for Android)
-- **MinGW-w64**
 
-### Build Targets
+- `make`
+- Docker image `gbl_builder:latest`
+- WSL users: export `DOCKER_HOST=unix:///run/docker.sock` before invoking
+  Docker directly
 
-**Note:** You **do not** need to provide an `abl.img` to build the distributable toolkits or Magisk module.
+### Fork Build Targets
 
-- **`make target_toolkit_linux`**
-  Builds the EDK2 native payload (`loader.elf`) and compiles the patching utilities (`extractfv`, `patch_abl`, `elf_inject`, etc.) for Linux.
+The targets below are added and maintained by this fork. Other inherited
+upstream targets may still exist in the Makefiles, but they are not the release
+focus of this repository.
 
-- **`make target_toolkit_windows`**
-  Similar to `dist_loader`, but cross-compiles the patching utilities into Windows `.exe` programs using MinGW-w64.
+- `make target_generic_efi_prc`
+  Builds `targets/generic_efi/build/generic_superfastboot_prc.efi`.
 
-- **`make target_magisk_module`**
-  Cross-compiles the patcher tools for Android using your NDK and builds the EDK2 payload.
+- `make target_generic_efi_row`
+  Builds `targets/generic_efi/build/generic_superfastboot_row.efi`.
 
-- **`make target_generic_efi`**
-  Embeds the patch tools, aiming to be universal across multiple device models. However, high-version compatibility is poor, and it is gradually being deprecated.
+- `make target_generic_efi_prc_arb`
+  Builds `targets/generic_efi/build/generic_superfastboot_prc_arb.efi`.
+
+- `make target_generic_efi_row_arb`
+  Builds `targets/generic_efi/build/generic_superfastboot_row_arb.efi`.
+
+- `make target_generic_efi_all`
+  Builds all four EFI variants above.
+
+The `generic_superfastboot` filename is kept for compatibility with the
+upstream build layout.
 
 ---
 
 ## User Guide
 
-For more detailed instructions, please refer to the [Wiki](https://github.com/superturtlee/gbl_root_canoe/wiki).
+### 1. Using Generic EFIs
 
-### 1. Using the Magisk Module (On-Device)
+Use the EFI variant that matches the desired region behavior:
 
-The Magisk module is designed to run directly on your rooted Android device.
+- `generic_superfastboot_prc.efi`
+- `generic_superfastboot_row.efi`
+- `generic_superfastboot_prc_arb.efi`
+- `generic_superfastboot_row_arb.efi`
 
-**Requirements:**
-- Device must be Snapdragon 8 Gen 5 / 8 Elite (Gen 5).
-- Bootloader must be unlocked.
-- Kernel must NOT have Baseband Guard.
+Flash the selected EFI to `efisp` through EDL mode (`9008`).
 
-**Installation & Usage:**
-When flashing the Magisk module via a root manager (like KernelSU, Magisk, or APatch), the customized script will interact with you using the volume keys:
-- **Volume Up (First-time installation):** The script automatically extracts the live `.abl` image, patches it, and flashes the patched file directly to `/dev/block/by-name/efisp`. After this finishes, you must reboot into Recovery mode and **format Data**. Once booted, install this module again (selecting Volume Down the second time) to complete the installation.
-- **Volume Down (OTA retention or post-format):** Used for retaining the BL version after an OTA update. Before updating OTA, use the module to automatically downgrade ABL, then reboot the system.
+The `_arb` variants are only for builds that intentionally include the ARB
+variant behavior. Prefer the non-`_arb` variants unless that path is explicitly
+needed.
 
-### 2. Using the PC Toolkits (Linux / Windows)
+### 2. OTA Upgrade
 
-If you downloaded the `target_toolkit_linux` or `target_toolkit_windows` zip files:
-1. Extract the toolkit zip on your PC.
-2. Place your device's stock `abl.img` inside the `images/` (or `images\`) directory of the toolkit.
-3. **Linux:** Run `bash build.sh` (or `make build`). **Windows:** Run `build.bat`.
-4. The scripts will extract, patch, and inject the custom payload, outputting the modified file `ABL_with_superfastboot.efi`. (Check the output logs; if it says "Warning: Failed to patch ABL GBL", the device is not vulnerable and ABL needs to be downgraded).
+Before an OTA or firmware change, verify whether the active-slot ABL and the
+target firmware are both covered by the current patch set. This fork patches the
+ABL loaded through `efisp`; boot-chain components that execute before that point
+are outside the EFI patcher's reach.
 
-### 3. Using Pre-patched EFIs
-Download a specific release version that contains the phone model or codename in its filename. Use `ABL_with_superfastboot.efi` or `ABL.efi` from the package to boot or flash via `fastboot` commands (e.g., `fastboot flash efisp ABL_with_superfastboot.efi`). It is highly recommended to use the version with `superfastboot` to preserve fallback fastboot-flashing capabilities.
+### 3. Variant Notes
 
-### 4. Using Generic EFIs (Deprecated)
-Download `generic_superfastboot.efi` and perform the relevant flashing steps. Due to compatibility issues and instability across different OEM device features, it might perform poorly on certain models or OS versions, and is **no longer recommended**.
-
-### 5. OTA Upgrade
-Before rebooting for an OTA update, use the module to flash and retain the old ABL version. If you are doing a major version upgrade, it is recommended to check "Update efisp", otherwise the device might get stuck on the initial boot screen.
-
-### 6. Superfastboot Usage Instructions
-When OEM Unlocking is enabled and the white warning text appears on boot, you must press **Volume Down** to enter Superfastboot mode.
-Common commands include:
-- **Temp-boot an EFI file (without flashing)**: `fastboot boot xxx.efi`
-- **Lock and Unlock (BL related)**:
-  - Lock BL, triggers a data wipe: `fastboot flashing lock`
-  - Unlock BL, no data wipe: `fastboot flashing unlock` or `fastboot flashing unlock_critical`
-  - *Note: If the TEE status is inconsistent, the device will refuse to provide the data key, rendering data inaccessible.*
-- **Flashing and Erasing**:
-  - `fastboot flash <partition> <file.img>`
-  - `fastboot erase <partition>`
-- **Rebooting**:
-  - `fastboot reboot bootloader` (Next normal boot enters Official Fastboot)
-  - `fastboot reboot recovery`
-  - `fastboot reboot`
-
-### 7. Explanation of Different Variants
-1. `ABL.efi`: The patched ABL.
-2. `ABL_original`: For developers to analyze in IDA, used for error reporting. **DO NOT flash**.
-3. `ABL_with_superfastboot.efi`: The patched ABL integrated with superfastboot.
-4. `loader.elf`: The superfastboot binary file. Unlinked to EFI format, it is meant to link with toolbox. Cannot be flashed directly.
+- PRC / ROW variants force the corresponding region-facing cmdline values.
+- `_arb` variants are separate build outputs for ARB-specific testing.
+- The EFI patches ABL in memory at boot time; it does not permanently rewrite
+  the `abl` partition by itself.
