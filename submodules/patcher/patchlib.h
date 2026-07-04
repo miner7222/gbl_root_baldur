@@ -717,21 +717,21 @@ INT32 patch_snapshot_cancel_lock_bypass(CHAR8* buffer, INT32 size) {
     return 1;
 }
 
-/* Stage A — region compatibility bypass.
+/* Region compatibility bypass.
  *
- * Stage A-1 handles the direct string/branch layout.
+ * This handles the direct string/branch layout.
  * Anchor: diagnostic string printed when image / device region tags
  * mismatch (typo "is not invalid" intact in known vintages).
  *
- * A-1 primary: rewrite the cbz Xt sitting one instruction before the
- * adrp+add to that string into an unconditional B with the same
- * compatible-path target. The primary mismatch branch can no longer
+ * Direct-layout primary patch: rewrite the cbz Xt sitting one instruction
+ * before the adrp+add to that string into an unconditional B with the
+ * same compatible-path target. The primary mismatch branch can no longer
  * fall into the shutdown sequence.
  *
- * A-1 secondary: two shutdown branches (B.EQ and CBNZ Xt) in the
- * same block remain reachable from alternative entries that bypass
- * the cbz. They both target a single shutdown stub. Overwrite that
- * stub's first instruction with an unconditional B to the same
+ * Direct-layout secondary patch: two shutdown branches (B.EQ and CBNZ
+ * Xt) in the same block remain reachable from alternative entries that
+ * bypass the cbz. They both target a single shutdown stub. Overwrite
+ * that stub's first instruction with an unconditional B to the same
  * compatible-path target so every incoming branch becomes a no-op
  * redirect.
  *
@@ -866,12 +866,13 @@ INT32 patch_region_lockout_bypass(CHAR8* buffer, INT32 size) {
     return 2;
 }
 
-/* Stage A-2 — record-table/message-page region bypass.
+/* Record-table/message-page region bypass.
  *
  * Newer vintages move the diagnostic strings into a structured message
- * table indexed by record id. The cbz X0 anchor used by Stage A-1 no
- * longer has a direct adrp+add xref (string-payload lookup is
- * indirected through the table), so Stage A-1 silently no-ops. The
+ * table indexed by record id. The cbz X0 anchor used by the direct
+ * layout locator no longer has a direct adrp+add xref (string-payload
+ * lookup is indirected through the table), so that locator silently
+ * no-ops. The
  * shutdown stub still exists and still ends with `BL <reset>; B
  * <continue>` after one or more `BL <print>` calls preceded by
  * adrp+add references to the message page.
@@ -970,9 +971,9 @@ INT32 patch_region_bypass_stage_a2(CHAR8* buffer, INT32 size) {
     return 0;
 }
 
-/* Stage B — kernel cmdline region override.
+/* Kernel cmdline region override.
  *
- * Stage B-1 redirects the `androidboot.pcbaidinfo=` value pointer.
+ * Redirect the `androidboot.pcbaidinfo=` value pointer.
  *
  * ABL builds the kernel cmdline by appending `androidboot.pcbaidinfo=<value>`
  * where the value is sourced at runtime (TZ region tag or device buffer).
@@ -1086,13 +1087,13 @@ INT32 patch_pcbaidinfo_override(CHAR8* buffer, INT32 size,
     return patched;
 }
 
-/* Stage B-2 — `hqsysfs.pcba_config=` value override.
+/* `hqsysfs.pcba_config=` value override.
  *
  * The hqsysfs kernel module exposes /sys/module/hqsysfs/parameters/
  * pcba_config which carries the region tag (PRC vs ROW) from the
  * kernel cmdline argument `hqsysfs.pcba_config=PRC` emitted by ABL.
  *
- * Earlier revisions of this stage tried two approaches:
+ * Earlier revisions of this patch tried two approaches:
  *  v1) Redirect the key-string adrp+add to an embedded override
  *      " hqsysfs.pcba_config=ROW " in .data NUL padding. That flipped
  *      /sys/module/hqsysfs/parameters/pcba_config to "ROW", but the
@@ -1110,7 +1111,7 @@ INT32 patch_pcbaidinfo_override(CHAR8* buffer, INT32 size,
  *      The skipped key left "MP" (preceding emission's value) glued
  *      directly to "PRC" (our emission's value) with no separator.
  *
- * v3 (current): keep both formatter calls, but redirect only the value
+ * Current approach: keep both formatter calls, but redirect only the value
  * pointer load to a fixed rodata literal. Pattern around ROW ABL:
  *
  *   ADRP X2, " hqsysfs.pcba_config="
@@ -1228,7 +1229,7 @@ INT32 patch_hqsysfs_pcba_config_override(CHAR8* buffer, INT32 size,
     return patched;
 }
 
-/* Stage C — vbmeta AVB key swap.
+/* vbmeta AVB key swap.
  *
  * Locates the embedded 4096-bit AvbRSAPublicKey blob for the platform's
  * stock vbmeta verify key and overwrites it in place with the AOSP test
@@ -1388,7 +1389,7 @@ INT32 patch_swap_avb_key_arb(CHAR8* buffer, INT32 size) {
     return patched;
 }
 
-/* Stage D — disable `oem lock-flash` fastboot command.
+/* Disable `oem lock-flash` fastboot command.
  *
  * On ROW builds an `oem lock-flash` command writes the CSDK flash_dis
  * flag to 1, which gates Firehose LUN 0 writes on next EDL session. The
@@ -1448,7 +1449,7 @@ INT32 patch_disable_lock_flash_cmd(CHAR8* buffer, INT32 size) {
     return patched;
 }
 
-/* Stage E - bypass `oem unlock-region` token verification.
+/* Bypass `oem unlock-region` token verification.
  *
  * The command still requires a locked device and still accepts only the
  * exact ROW / PRC region strings. Only the token challenge verification
@@ -1568,9 +1569,9 @@ INT32 patch_unlock_region_token_bypass(CHAR8* buffer, INT32 size) {
     return patched;
 }
 
-/* Stage F - bypass AVB and TZ rollback protection.
+/* AVB and TZ rollback protection bypass.
  *
- * This stage covers three separate rollback channels:
+ * This patch covers three separate rollback channels:
  *   1. force the AVB image-vs-stored rollback comparison to its accept path
  *   2. replace WriteRollbackIndex with a success-return stub
  *   3. suppress both TZ rollback-version update SIPs with fake success
