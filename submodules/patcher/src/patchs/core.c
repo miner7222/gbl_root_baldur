@@ -177,6 +177,7 @@ int32_t patch_adrl_unlocked_to_locked(char* buffer, int32_t size, uint64_t load_
 #include "patchs/lenovo/lock_flash_cmd.h"
 #include "patchs/lenovo/keymaster_unlock_sink.h"
 #include "patchs/lenovo/region_lockout_bypass.h"
+#include "patchs/lenovo/cmdline_region_override.h"
 bool PatchBuffer(char* data, int32_t size) {
     if (patch_abl_gbl(data, size) != 0)
         printf("Warning: Failed to patch ABL GBL\n");
@@ -217,6 +218,18 @@ bool PatchBuffer(char* data, int32_t size) {
         printf("Info: region lockout bypass not applied\n");
     if (patch_region_message_page_bypass(data, size) == 0)
         printf("Info: region message-page bypass not applied\n");
+
+    #if defined(FORCE_PCBAIDINFO_PRC)
+    if (patch_pcbaidinfo_override(data, size, "PRC") == 0)
+        printf("Info: cmdline override (pcbaidinfo/PRC) not applied\n");
+    if (patch_hqsysfs_pcba_config_override(data, size, "PRC") == 0)
+        printf("Info: cmdline override (hqsysfs/PRC) not applied\n");
+    #elif defined(FORCE_PCBAIDINFO_ROW)
+    if (patch_pcbaidinfo_override(data, size, "ROW") == 0)
+        printf("Info: cmdline override (pcbaidinfo/ROW) not applied\n");
+    if (patch_hqsysfs_pcba_config_override(data, size, "ROW") == 0)
+        printf("Info: cmdline override (hqsysfs/ROW) not applied\n");
+    #endif
 
     // `oem lock-flash` exists in ROW ABLs only.
     #if defined(FORCE_PCBAIDINFO_ROW)
