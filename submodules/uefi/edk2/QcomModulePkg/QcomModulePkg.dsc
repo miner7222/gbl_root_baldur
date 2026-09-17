@@ -114,7 +114,7 @@
 
 [LibraryClasses.common.UEFI_APPLICATION]
   ReportStatusCodeLib|MdeModulePkg/Library/DxeReportStatusCodeLib/DxeReportStatusCodeLib.inf
-  # ExtractGuidedSectionLib|MdePkg/Library/DxeExtractGuidedSectionLib/DxeExtractGuidedSectionLib.inf
+  ExtractGuidedSectionLib|MdePkg/Library/DxeExtractGuidedSectionLib/DxeExtractGuidedSectionLib.inf
 
 [BuildOptions.common]
   GCC:*_*_*_ARCHCC_FLAGS  = -Wno-shift-negative-value -fstack-protector-all -Wno-varargs -fno-common -Wno-misleading-indentation -Wno-unknown-warning-option
@@ -196,6 +196,9 @@
   !endif
   !if $(AUTO_PATCH_ABL) == 1
       GCC:*_*_*_CC_FLAGS = -DAUTO_PATCH_ABL
+      GCC:*_*_*_CC_FLAGS = -I$(WORKSPACE)/../../patcher/include
+      GCC:*_*_*_CC_FLAGS = -I$(WORKSPACE)/../../patcher/uefi_include
+      GCC:*_*_*_CC_FLAGS = -Wno-error
   !endif
     !if $(DISABLE_PRINT) == 1
       GCC:*_*_*_CC_FLAGS = -DDISABLE_PRINT

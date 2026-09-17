@@ -182,6 +182,11 @@ WaitForVolumeUpKey (IN UINT32 TimeoutMs)
   return KeyDetected;
 }
 
+#ifdef AUTO_PATCH_ABL
+EFI_STATUS
+RuntimePatchAndBoot (VOID);
+#endif
+
 EFI_STATUS EFIAPI  __attribute__ ( (no_sanitize ("safe-stack")))
 LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 {
@@ -245,6 +250,16 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
 
     if (!MenuRequested) {
+#ifdef AUTO_PATCH_ABL
+      /* Variant builds patch the live ABL and boot it in place.  On any
+       * failure fall through to the persisted default entry. */
+      Status = RuntimePatchAndBoot ();
+      if (!EFI_ERROR (Status)) {
+        goto stack_guard_update_default;
+      }
+      DEBUG ((EFI_D_ERROR,
+              "RuntimePatchBoot: falling back to saved entry (%r)\n", Status));
+#endif
       /* No menu key: boot the saved default. This does not return on success;
        * it only comes back if there is no saved default or the launch failed,
        * in which case the menu is shown so the user is never stranded. */
