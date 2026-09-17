@@ -55,15 +55,18 @@ int32_t patch_abl_bootstate(char* buffer, int32_t size,
 }
 // track_forward_patch_strb callback example: patch STRB to STR, so we can use the same register for 64-bit value instead of 8-bit, which is more likely to be used in real code and easier to track back to source.
 int32_t patch_strb_to_str_forward_callback(char* buffer, int32_t size, int32_t off, DecodedInst d, int32_t anchor_offset) {
-    if (d.type == INST_STRB_IMM || d.type == INST_STRB_POST || d.type == INST_STRB_PRE) {
+    if (d.type == INST_STRB_IMM || d.type == INST_STRB_POST || d.type == INST_STRB_PRE
+        || d.type == INST_STR_W_IMM) {
         if (off > anchor_offset) {
             StrbInfo si = decode_any_strb(d.raw);
+            if (!si.valid) return NEED_MORE;
+            const char* mnem = (si.size == 1) ? "STRB" : "STR ";
             if (si.rn == 31) {
-                printf("  0x%X: STRB W%d,[SP,#0x%X] ** SINK (after anchor0x%X) **\n",
-                    off, si.rt, si.imm, anchor_offset);
+                printf("  0x%X: %s W%d,[SP,#0x%X] ** SINK (after anchor0x%X) **\n",
+                    off, mnem, si.rt, si.imm, anchor_offset);
             } else {
-                printf("  0x%X: STRB W%d,[X%d,#0x%X] ** SINK (after anchor0x%X) **\n",
-                    off, si.rt, si.rn, si.imm, anchor_offset);
+                printf("  0x%X: %s W%d,[X%d,#0x%X] ** SINK (after anchor0x%X) **\n",
+                    off, mnem, si.rt, si.rn, si.imm, anchor_offset);
             }
             printf("  Before: %02X %02X %02X %02X\n",
                        (uint8_t)buffer[off], (uint8_t)buffer[off+1],
@@ -97,7 +100,7 @@ int32_t source_callback(char* buffer, int32_t size, int32_t now_offset, int8_t c
     #ifndef DISABLE_PATCH_5
     int32_t fwd = track_forward_patch_strb(buffer, size, now_offset, current_target, anchor_offset);
     if (fwd <= 0) {
-        printf("Warning: sink STRB not found after anchor 0x%X\n", anchor_offset);
+        printf("Warning: sink store not found after anchor 0x%X\n", anchor_offset);
         return -1;
     }
     printf("Sink patched successfully.\n");

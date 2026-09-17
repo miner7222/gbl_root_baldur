@@ -15,12 +15,13 @@ typedef struct {
     DataLoc locs[256];
     int32_t count;
 } LocSet;
-/* 判断一条指令是否为任意形式的 STRB，并提取字段 */
+/* 判断一条指令是否为任意形式的 STRB / STR W，并提取字段 */
 typedef struct {
     bool valid;
     uint8_t   rt;
     uint8_t   rn;
     uint32_t  imm;
+    uint8_t   size;   /* 1 = STRB, 4 = STR W */
 } StrbInfo;
 bool locset_has(const LocSet* s, DataLoc l);
 bool locset_has_reg  (const LocSet* s, int8_t r);

@@ -48,15 +48,36 @@ void locset_print(const LocSet* s) {
 }
 
 StrbInfo decode_any_strb(uint32_t raw) {
-    StrbInfo info = { false, 0, 0, 0 };
+    StrbInfo info = { false, 0, 0, 0, 0 };
     DecodedInst d = decode_inst(raw);
 
     if (d.type == INST_STRB_IMM) {
-        info.valid = true; info.rt = d.rt; info.rn = d.rn; info.imm = d.imm;
+        info.valid = true; info.rt = d.rt; info.rn = d.rn; info.imm = d.imm; info.size = 1;
     } else if (d.type == INST_STRB_POST || d.type == INST_STRB_PRE) {
-        info.valid = true; info.rt = d.rt; info.rn = d.rn; info.imm = (uint32_t)d.simm & 0x1FF;
+        info.valid = true; info.rt = d.rt; info.rn = d.rn; info.imm = (uint32_t)d.simm & 0x1FF; info.size = 1;
+    } else if (d.type == INST_STR_W_IMM) {
+        info.valid = true; info.rt = d.rt; info.rn = d.rn; info.imm = d.imm; info.size = 4;
     }
     return info;
+}
+
+/* Fallback sink acceptance for a lost register trace.
+ *
+ * A real boot-state sink stores into a context structure field, so accept
+ * only stores close to the anchor, with a non-SP base and a field offset
+ * in the range observed on ABL context structs.  This keeps the fallback
+ * off unrelated stores after the anchor (for example the KeyMaster
+ * command buffer at [SP, #0x60]).
+ */
+#define FALLBACK_SINK_MAX_DISTANCE  0x40
+#define FALLBACK_SINK_MIN_FIELD_OFF 0x100
+#define FALLBACK_SINK_MAX_FIELD_OFF 0x800
+
+static bool fallback_sink_acceptable(StrbInfo si, int32_t off, int32_t anchor_off) {
+    if (off - anchor_off > FALLBACK_SINK_MAX_DISTANCE) return false;
+    if (si.rn == 31) return false;
+    if (si.imm < FALLBACK_SINK_MIN_FIELD_OFF || si.imm > FALLBACK_SINK_MAX_FIELD_OFF) return false;
+    return true;
 }
 
 int32_t find_ldrB_instructio_reverse(char* buffer, int32_t size,
@@ -196,23 +217,6 @@ int32_t track_forward(char* buffer, int32_t size, int32_t start_offset,
             }
             break;
 
-        /* ---- STR Wt, [SP, #imm] 32-bit spill ---- */
-        case INST_STR_W_IMM:
-            if (d.rn == 31) {
-                if (locset_has_reg(&set, (int8_t)d.rt)) {
-                    int32_t cb_result = callback(buffer, size, off, d, ancher_offset);
-                    if (cb_result!=NEED_MORE) return cb_result;
-                    printf("  0x%X: STR W%d,[SP,#0x%X] spill32\n", off, d.rt, d.imm);
-                    locset_add_stk64(&set, d.imm);
-                    locset_print(&set);
-                } else if (locset_has_stk64(&set, d.imm)) {
-                    printf("  0x%X: STR W%d,[SP,#0x%X] overwrite stk -> del\n", off, d.rt, d.imm);
-                    locset_del_stk64(&set, d.imm);
-                    locset_print(&set);
-                }
-            }
-            break;
-
         /* ---- LDR Wt, [SP, #imm] 32-bit reload ---- */
         case INST_LDR_W_IMM:
             if (d.rn == 31) {
@@ -260,24 +264,58 @@ int32_t track_forward(char* buffer, int32_t size, int32_t start_offset,
             }
             break;
 
-        /* ---- STRB (所有形式) ---- */
+        /* ---- STRB / STR W: spill slot or boot-state sink ----
+         *
+         * The boot-state value may be written as a byte (STRB) or as a
+         * 32-bit word (STR W).  Stores to SP are spills; stores through
+         * a base register are sink candidates.
+         *
+         * The fallback path (register trace lost) is bounded by
+         * fallback_sink_acceptable so it does not latch onto unrelated
+         * stores after the anchor.
+         */
         case INST_STRB_IMM:
         case INST_STRB_POST:
-        case INST_STRB_PRE: {
+        case INST_STRB_PRE:
+        case INST_STR_W_IMM: {
             StrbInfo si = decode_any_strb(d.raw);
-            if (si.valid && (locset_has_reg(&set, (int8_t)si.rt)||(locset_empty(&set)&&off > ancher_offset))) {
-                //typedef int32_t (*ForwardCallback)(char* buffer, int32_t size, int32_t now_offset, DecodedInst d, int32_t ancher_offset);
+            if (!si.valid) break;
+
+            /* Sink candidate: a store of the traced register, or a
+             * bounded fallback once the trace is lost.  The fallback
+             * never accepts SP stores, so the KeyMaster command buffer
+             * at [SP, #0x60] stays out of this patch. */
+            bool tracked  = locset_has_reg(&set, (int8_t)si.rt);
+            bool fallback = locset_empty(&set) && off > ancher_offset
+                            && fallback_sink_acceptable(si, off, ancher_offset);
+            if (off > ancher_offset && (tracked || fallback)) {
                 int32_t cb_result = callback(buffer, size, off, d, ancher_offset);
-                if (cb_result!=NEED_MORE) return cb_result;
-                printf("  0x%X: STRB W%d,[X%d,#0x%X] -> spill8\n",
-                        off, si.rt, si.rn, si.imm);
-                if (si.rn == 31) locset_add_stk8(&set, si.imm);
-                locset_print(&set);
-                
-            } else if (si.valid && si.rn == 31 && locset_has_stk8(&set, si.imm)) {
-                printf("  0x%X: STRB W%d,[SP,#0x%X] overwrite stk8 -> del\n",
-                       off, si.rt, si.imm);
-                locset_del_stk8(&set, si.imm);
+                if (cb_result == SUCCESS) return 1;
+                if (cb_result != NEED_MORE) return cb_result;
+            }
+
+            /* SP-relative stores are spill slots. */
+            if (si.rn == 31) {
+                if (locset_has_reg(&set, (int8_t)si.rt)) {
+                    if (si.size == 1) {
+                        printf("  0x%X: STRB W%d,[SP,#0x%X] spill8\n",
+                               off, si.rt, si.imm);
+                        locset_add_stk8(&set, si.imm);
+                    } else {
+                        printf("  0x%X: STR W%d,[SP,#0x%X] spill32\n",
+                               off, si.rt, si.imm);
+                        locset_add_stk64(&set, si.imm);
+                    }
+                    locset_print(&set);
+                } else if (si.size == 1 && locset_has_stk8(&set, si.imm)) {
+                    printf("  0x%X: STRB W%d,[SP,#0x%X] overwrite stk8 -> del\n",
+                           off, si.rt, si.imm);
+                    locset_del_stk8(&set, si.imm);
+                } else if (si.size == 4 && locset_has_stk64(&set, si.imm)) {
+                    printf("  0x%X: STR W%d,[SP,#0x%X] overwrite stk -> del\n",
+                           off, si.rt, si.imm);
+                    locset_del_stk64(&set, si.imm);
+                }
             }
             break;
         }
@@ -287,7 +325,7 @@ int32_t track_forward(char* buffer, int32_t size, int32_t start_offset,
         }
     }
 
-    printf("Forward tracking: no sink STRB found after anchor 0x%X\n", ancher_offset);
+    printf("Forward tracking: no sink store found after anchor 0x%X\n", ancher_offset);
     return FAILURE;
 }
 bool str_at(const char* buffer, int32_t size, int64_t file_off, const char* needle) {
