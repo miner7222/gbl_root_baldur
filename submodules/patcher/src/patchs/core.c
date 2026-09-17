@@ -175,6 +175,7 @@ int32_t patch_adrl_unlocked_to_locked(char* buffer, int32_t size, uint64_t load_
 }
 
 #include "patchs/lenovo/lock_flash_cmd.h"
+#include "patchs/lenovo/keymaster_unlock_sink.h"
 bool PatchBuffer(char* data, int32_t size) {
     if (patch_abl_gbl(data, size) != 0)
         printf("Warning: Failed to patch ABL GBL\n");
@@ -206,6 +207,10 @@ bool PatchBuffer(char* data, int32_t size) {
                (int)lock_register_num);
     }
     printf("Global variable offset (for warning patch): 0x%X\n", global_var_offset);
+
+    if (!patch_keymaster_unlock_sink(data, size, offset)) {
+        printf("Warning: keymaster unlock sink not applied\n");
+    }
 
     // `oem lock-flash` exists in ROW ABLs only.
     #if defined(FORCE_PCBAIDINFO_ROW)
