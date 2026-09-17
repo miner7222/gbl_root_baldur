@@ -27,6 +27,17 @@ target_magisk_module:
 target_toolkit_android:
 	cd targets/toolkit_android && make build
 
+target_runtime_efi_prc:
+	cd targets/runtime_efi && make build_prc
+target_runtime_efi_row:
+	cd targets/runtime_efi && make build_row
+target_runtime_efi_prc_arb:
+	cd targets/runtime_efi && make build_prc_arb
+target_runtime_efi_row_arb:
+	cd targets/runtime_efi && make build_row_arb
+target_runtime_efi_all:
+	cd targets/runtime_efi && make build_all
+
 dev_target_extract_and_patch:
 	cd dev_targets/extract_and_patch && make patch
 

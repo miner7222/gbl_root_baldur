@@ -20,7 +20,7 @@
 #define PCBAIDINFO_SCAN_WINDOW 0x20
 #define HQSYSFS_SCAN_WINDOW    0x34
 
-static int32_t find_bytes(char* buffer, int32_t size, const char* needle) {
+static int32_t find_cmdline_bytes(char* buffer, int32_t size, const char* needle) {
     int32_t len = (int32_t)strlen(needle);
     for (int32_t i = 0; i + len < size; ++i) {
         if (memcmp(buffer + i, needle, len) == 0) return i;
@@ -60,7 +60,7 @@ int32_t patch_pcbaidinfo_override(char* buffer, int32_t size,
 
     if (!region || !region[0] || !region[1] || !region[2]) return 0;
 
-    int32_t key_off = find_bytes(buffer, size, key);
+    int32_t key_off = find_cmdline_bytes(buffer, size, key);
     if (key_off < 0) {
         printf("cmdline pcbaidinfo: key string not present, skipping\n");
         return 0;
@@ -112,7 +112,7 @@ int32_t patch_hqsysfs_pcba_config_override(char* buffer, int32_t size,
 
     if (!region || !region[0] || !region[1] || !region[2]) return 0;
 
-    int32_t key_off = find_bytes(buffer, size, key);
+    int32_t key_off = find_cmdline_bytes(buffer, size, key);
     if (key_off < 0) {
         printf("cmdline hqsysfs: key string not present, skipping\n");
         return 0;

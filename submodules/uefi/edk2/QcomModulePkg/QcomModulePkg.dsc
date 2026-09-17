@@ -200,6 +200,15 @@
       GCC:*_*_*_CC_FLAGS = -I$(WORKSPACE)/../../patcher/uefi_include
       GCC:*_*_*_CC_FLAGS = -Wno-error
   !endif
+  !if $(FORCE_PCBAIDINFO_PRC) == 1
+      GCC:*_*_*_CC_FLAGS = -DFORCE_PCBAIDINFO_PRC
+  !endif
+  !if $(FORCE_PCBAIDINFO_ROW) == 1
+      GCC:*_*_*_CC_FLAGS = -DFORCE_PCBAIDINFO_ROW
+  !endif
+  !if $(FORCE_AVB_KEY_ARB) == 1
+      GCC:*_*_*_CC_FLAGS = -DFORCE_AVB_KEY_ARB
+  !endif
     !if $(DISABLE_PRINT) == 1
       GCC:*_*_*_CC_FLAGS = -DDISABLE_PRINT
   !endif

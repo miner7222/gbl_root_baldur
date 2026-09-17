@@ -11,4 +11,10 @@
 #include "../../../../../patcher/src/patchs/core.c"
 #include "../../../../../patcher/src/patchs/oplus/warning.c"
 #include "../../../../../patcher/src/patchs/oplus/forceenablefastboot.c"
+#include "../../../../../patcher/src/patchs/lenovo/lock_flash_cmd.c"
+#include "../../../../../patcher/src/patchs/lenovo/keymaster_unlock_sink.c"
+#include "../../../../../patcher/src/patchs/lenovo/region_lockout_bypass.c"
+#include "../../../../../patcher/src/patchs/lenovo/cmdline_region_override.c"
+#include "../../../../../patcher/src/patchs/lenovo/avb_key_swap.c"
+#include "../../../../../patcher/src/patchs/lenovo/unlock_region_token.c"
 #endif
