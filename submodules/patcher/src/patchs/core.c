@@ -174,8 +174,6 @@ int32_t patch_adrl_unlocked_to_locked(char* buffer, int32_t size, uint64_t load_
     return patched;
 }
 
-#include "patchs/oplus/warning.h"
-#include "patchs/oplus/forceenablefastboot.h"
 #include "patchs/lenovo/lock_flash_cmd.h"
 bool PatchBuffer(char* data, int32_t size) {
     if (patch_abl_gbl(data, size) != 0)
@@ -208,19 +206,6 @@ bool PatchBuffer(char* data, int32_t size) {
                (int)lock_register_num);
     }
     printf("Global variable offset (for warning patch): 0x%X\n", global_var_offset);
-    // ===================== 启用去黄字补丁 =====================
-
-
-    //oplus
-    if (!patch_warning(data, size, global_var_offset)) {
-        printf("OPlus Warning: patch_warning failed\n");
-    }
-
-    //force enable fastboot for unofficially unlock
-    if (!patch_fastboot(data, size, global_var_offset)) {
-        printf("OPlus Warning: patch_fastboot failed\n");
-    }
-    // ==========================================================
 
     // `oem lock-flash` exists in ROW ABLs only.
     #if defined(FORCE_PCBAIDINFO_ROW)
