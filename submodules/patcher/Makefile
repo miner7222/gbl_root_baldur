@@ -8,6 +8,14 @@ build:
 	mkdir -p build
 	gcc $(CFLAGS) -o build/patch_abl $(SRCS)
 
+build_prc:
+	mkdir -p build
+	gcc $(CFLAGS) -DFORCE_PCBAIDINFO_PRC -o build/patch_abl_prc $(SRCS)
+
+build_row:
+	mkdir -p build
+	gcc $(CFLAGS) -DFORCE_PCBAIDINFO_ROW -o build/patch_abl_row $(SRCS)
+
 build_android:
 	mkdir -p build
 	$(NDK_PATH)/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang $(CFLAGS) -o build/patch_abl_android $(SRCS)

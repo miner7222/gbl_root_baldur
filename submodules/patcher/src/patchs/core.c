@@ -176,6 +176,7 @@ int32_t patch_adrl_unlocked_to_locked(char* buffer, int32_t size, uint64_t load_
 
 #include "patchs/oplus/warning.h"
 #include "patchs/oplus/forceenablefastboot.h"
+#include "patchs/lenovo/lock_flash_cmd.h"
 bool PatchBuffer(char* data, int32_t size) {
     if (patch_abl_gbl(data, size) != 0)
         printf("Warning: Failed to patch ABL GBL\n");
@@ -220,6 +221,13 @@ bool PatchBuffer(char* data, int32_t size) {
         printf("OPlus Warning: patch_fastboot failed\n");
     }
     // ==========================================================
+
+    // `oem lock-flash` exists in ROW ABLs only.
+    #if defined(FORCE_PCBAIDINFO_ROW)
+    if (!patch_disable_lock_flash_cmd(data, size)) {
+        printf("Warning: lock-flash cmd patch not applied\n");
+    }
+    #endif
 
     return 1;
 }
