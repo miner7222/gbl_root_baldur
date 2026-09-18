@@ -93,6 +93,7 @@
   @retval other             Some error occurs when executing this entry point.
 
  **/
+#ifndef AUTO_PATCH_ABL
 /*
  * 开机时扫描音量上键（WaitForVolumeDownKey 的镜像）。
  *
@@ -181,6 +182,7 @@ WaitForVolumeUpKey (IN UINT32 TimeoutMs)
 
   return KeyDetected;
 }
+#endif
 
 #ifdef AUTO_PATCH_ABL
 EFI_STATUS
@@ -226,6 +228,27 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   }
 
   {
+#ifdef AUTO_PATCH_ABL
+    /*
+     * Runtime variants boot directly: patch the live ABL and chainload it.
+     * The boot menu is deliberately not reachable, so Volume Up at power-on
+     * is left to the bootloader's own handling (EDL trigger). On failure fall
+     * back to the persisted default entry instead of showing the menu.
+     */
+    Status = RuntimePatchAndBoot ();
+    if (!EFI_ERROR (Status)) {
+      goto stack_guard_update_default;
+    }
+    DEBUG ((EFI_D_ERROR,
+            "RuntimePatchBoot: falling back to saved entry (%r)\n", Status));
+
+    Status = SfbStartFatStack ();
+    if (EFI_ERROR (Status)) {
+      DEBUG ((EFI_D_ERROR, "Unable to start the FAT stack: %r\n", Status));
+    }
+    SfbLaunchDefaultEntry ();
+    goto stack_guard_update_default;
+#else
     UINT8  MenuRequested;
 
     /*
@@ -250,16 +273,6 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
     }
 
     if (!MenuRequested) {
-#ifdef AUTO_PATCH_ABL
-      /* Variant builds patch the live ABL and boot it in place.  On any
-       * failure fall through to the persisted default entry. */
-      Status = RuntimePatchAndBoot ();
-      if (!EFI_ERROR (Status)) {
-        goto stack_guard_update_default;
-      }
-      DEBUG ((EFI_D_ERROR,
-              "RuntimePatchBoot: falling back to saved entry (%r)\n", Status));
-#endif
       /* No menu key: boot the saved default. This does not return on success;
        * it only comes back if there is no saved default or the launch failed,
        * in which case the menu is shown so the user is never stranded. */
@@ -280,6 +293,7 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
 
     SfbShowFastbootMode ();
     DEBUG ((EFI_D_INFO, "Boot menu requested fastboot\n"));
+#endif
   }
 
 #ifdef AUTO_VIRT_ABL
