@@ -17,4 +17,5 @@
 #include "../../../../../patcher/src/patchs/lenovo/cmdline_region_override.c"
 #include "../../../../../patcher/src/patchs/lenovo/avb_key_swap.c"
 #include "../../../../../patcher/src/patchs/lenovo/unlock_region_token.c"
+#include "../../../../../patcher/src/patchs/lenovo/flashing_unlock_verify_bypass.c"
 #endif

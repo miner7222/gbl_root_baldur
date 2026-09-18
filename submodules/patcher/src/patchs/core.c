@@ -180,6 +180,7 @@ int32_t patch_adrl_unlocked_to_locked(char* buffer, int32_t size, uint64_t load_
 #include "patchs/lenovo/cmdline_region_override.h"
 #include "patchs/lenovo/avb_key_swap.h"
 #include "patchs/lenovo/unlock_region_token.h"
+#include "patchs/lenovo/flashing_unlock_verify_bypass.h"
 bool PatchBuffer(char* data, int32_t size) {
     if (patch_abl_gbl(data, size) != 0)
         printf("Warning: Failed to patch ABL GBL\n");
@@ -240,6 +241,9 @@ bool PatchBuffer(char* data, int32_t size) {
 
     if (patch_unlock_region_token_bypass(data, size) == 0)
         printf("Info: unlock-region token bypass not applied\n");
+
+    if (patch_flashing_unlock_verify_bypass(data, size) == 0)
+        printf("Info: flashing-unlock verify bypass not applied\n");
 
     // `oem lock-flash` exists in ROW ABLs only.
     #if defined(FORCE_PCBAIDINFO_ROW)
